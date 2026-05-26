@@ -5,6 +5,43 @@
 
 ---
 
+## Completed Setup (Pre-Phase 1)
+
+Infrastructure and tooling completed before formal phases began.
+
+### VM & Orchestration
+- [x] GCP VM provisioned — e2-medium, 50GB SSD, us-central1-a, IP 34.45.46.60
+- [x] Hermes Agent v0.14.0 installed (`~/.local/bin/hermes`)
+- [x] Hermes configured with GPT-4o-mini via OpenAI (temporary — Qwen swap in Phase 1)
+- [x] Telegram gateway running as systemd service (`hermes-gateway`)
+- [x] Web dashboard running as systemd service (`hermes-dashboard`, port 9119)
+- [x] Caddy reverse proxy on port 80 with WebSocket fix (Host + Origin header rewrite)
+- [x] `terminal.cwd` set to `/home/freed/autotrade` in `~/.hermes/config.yaml`
+- [x] Hermes SOUL.md configured with project context and Claude Code rules
+
+### Claude Code
+- [x] Node.js 22 + Claude Code CLI installed on VM
+- [x] OAuth credentials copied from local machine (`~/.claude/.credentials.json`)
+- [x] Workspace trust pre-approved for `/home/freed/autotrade`
+- [x] GitHub deploy key (ed25519) added with write access to repo
+- [x] Claude Code → GitHub push confirmed working (Hermes delegates → Claude Code commits → push)
+
+### Memory Layers
+- [x] Hermes native memory: `MEMORY.md` + `USER.md` (active, `nudge_interval: 10`)
+- [x] Session history: `~/.hermes/state.db` SQLite with FTS5 full-text search
+- [x] Holographic memory provider enabled (`~/.hermes/memory_store.db`, `auto_extract: true`)
+- [x] `docs/memory-layers.md` — full memory architecture reference committed to repo
+
+### PostgreSQL (Agent Shared Memory)
+- [x] PostgreSQL 16 running as Docker container (`autotrade-postgres`, port 5432 localhost-only)
+- [x] `agent_memory` table live with upsert trigger and indexes (`migrations/init.sql`)
+- [x] `shared/db.py` — `memory_set / memory_get / memory_list / memory_delete` helpers
+- [x] `python3-psycopg2` installed system-wide on VM
+- [x] `.env` on VM: `POSTGRES_PASSWORD`, `EXECUTION_MODE`, `DATABASE_URL`
+- [x] Cross-agent memory test passed: Claude Code wrote → Hermes read via `psql`
+
+---
+
 ## Vision
 
 An autonomous trading system operated by three AI teams — a **Dev Team**, a **Trading Desk**, and a **Backtesting Team** — all orchestrated by Hermes and powered by Claude Code as the primary LLM engine.
@@ -353,16 +390,19 @@ claude -p "<task>" --workdir ~/autotrade/trading-desk/ --max-turns 10
 ## Build Phases
 
 ### Phase 1 — Foundation
-- [ ] Switch Hermes LLM → Qwen3-235b via OpenRouter
+- [ ] Switch Hermes LLM → Qwen3-235b via OpenRouter *(needs OpenRouter API key)*
 - [ ] Create `dev-team` and `trading-desk` Hermes profiles with SOUL.md
-- [ ] Restructure repo: `dev/`, `trading-desk/`, `shared/`, `migrations/`
-- [ ] Configure `terminal.cwd` per profile
+- [x] Restructure repo: `shared/`, `migrations/` created; `dev/`, `trading-desk/` pending
+- [x] Configure `terminal.cwd` — set to `/home/freed/autotrade` in `~/.hermes/config.yaml`
 - [ ] Set up Hermes cron placeholders (IST market schedule, disabled)
 
 ### Phase 2 — Data & Infrastructure
-- [ ] Docker Compose: PostgreSQL 16 + TimescaleDB + Redis
-- [ ] DB schema migrations (Alembic) — all tables above
-- [ ] `shared/db.py` — SQLAlchemy engine shared by all agents
+- [x] Docker Compose: PostgreSQL 16 container running (`autotrade-postgres`)
+- [ ] Upgrade to TimescaleDB (needed for OHLCV hypertable in Phase 4)
+- [ ] Add Redis to docker-compose.yml
+- [ ] DB schema migrations (Alembic) — full table set from schema above
+- [x] `shared/db.py` — psycopg2 helpers for `agent_memory` (SQLAlchemy upgrade optional later)
+- [x] `agent_memory` table live and tested
 - [ ] NSE OHLCV data fetcher (`trading-desk/data/nse.py`)
 - [ ] Shared indicators library (`shared/indicators.py`)
 - [ ] Seed historical OHLCV into TimescaleDB (Nifty 50 stocks, 1-year)
@@ -371,7 +411,7 @@ claude -p "<task>" --workdir ~/autotrade/trading-desk/ --max-turns 10
 - [ ] FastAPI skeleton (`dev/api/`) with DB connection
 - [ ] Paper trading engine (`trading-desk/broker/paper.py`) — writes to `trades` table
 - [ ] Risk rules (`trading-desk/risk/rules.yaml` + `position_sizer.py`)
-- [ ] Agent memory read/write helpers in `shared/db.py`
+- [x] Agent memory read/write helpers in `shared/db.py` — done (`memory_set/get/list/delete`)
 
 ### Phase 4 — Trading Desk (Paper)
 - [ ] First intraday strategy: RSI + VWAP (`trading-desk/strategies/intraday/rsi_vwap.py`)
