@@ -6,7 +6,8 @@ __pycache__/
 *.pyo
 *.pyd
 *.log
-*.html
-*.txt
+# Ignore root-level scratch files but allow dev/ outputs
+/*.html
+/*.txt
 node_modules/
 .DS_Store
