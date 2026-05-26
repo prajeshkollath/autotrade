@@ -9,10 +9,20 @@ import psycopg2.extras
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
+from pathlib import Path
+
+# Load .env from repo root if present
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://autotrade:autotrade@localhost:5432/autotrade"
+    "postgresql://autotrade:autotrade2026@localhost:5432/autotrade"
 )
 
 
