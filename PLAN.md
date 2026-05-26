@@ -48,6 +48,59 @@ An autonomous trading system operated by three AI teams — a **Dev Team**, a **
 
 ---
 
+## Why Hermes + Claude Code Together
+
+This is not a choice between two tools. Each does something the other cannot.
+
+### Capability Split
+
+| Capability | Hermes (Qwen/GPT-4o-mini) | Claude Code |
+|-----------|--------------------------|-------------|
+| Persistent memory across sessions | ✓ MEMORY.md, Holographic fact store, session search | ✗ Stateless — forgets after each run |
+| Automatic skill creation | ✓ Saves reusable procedures after complex tasks | ✗ No skill library |
+| Self-improvement over time | ✓ Learns patterns, builds skills, improves routing | ✗ Same capability every run |
+| Telegram / mobile interface | ✓ Native gateway | ✗ CLI only |
+| Kanban task board (mobile visibility) | ✓ Built-in, accessible via browser | ✗ None |
+| Cron scheduling (market hours) | ✓ Native cron with IST schedule | ✗ None |
+| Code writing & multi-agent execution | ✗ Weak — GPT-4o-mini is a router, not a coder | ✓ Full coding intelligence, sub-agent spawning |
+| Multi-file understanding | ✗ Limited | ✓ Reads whole repos, writes precise diffs |
+| Running tests, git operations | ✗ Unreliable | ✓ First-class tools |
+
+### The Self-Improving Loop
+
+```
+Task arrives via Telegram
+         ↓
+Hermes checks memory: "Have I seen a task like this before?
+                        Is there a skill I can load?"
+         ↓
+Hermes creates Kanban card → routes to claude-dev profile
+         ↓
+claude-dev fires: claude -p "<task + skill context>" --max-turns 30
+         ↓
+Claude Code executes (writes code, tests, commits, pushes)
+         ↓
+claude-dev reads output → kanban_complete()
+         ↓
+Hermes saves what worked → updates skill / memory
+         ↓
+Next similar task: faster, better context, reuses the skill
+```
+
+Over time Hermes builds a library of skills:
+- `how-to-add-fastapi-endpoint`
+- `how-to-backtest-rsi-strategy`
+- `how-to-generate-eod-report`
+- `how-to-run-intraday-scan`
+
+Each skill gets refined as the system learns what instructions produce good Claude Code output.
+
+### Why Not Just Claude Code CLI Directly?
+
+Claude Code CLI on its own has no memory between runs, no scheduler, no mobile interface, and no way to build institutional knowledge over time. Every run starts from zero. Hermes provides the persistent layer that makes the system improve instead of repeat itself.
+
+---
+
 ## Guiding Principles
 
 - **Hermes (Qwen) = thin router only** — receives instructions, delegates, reports back. No heavy reasoning.
