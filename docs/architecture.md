@@ -86,31 +86,63 @@ Options data and analytics platform.
 
 ---
 
+## UI & Dashboard
+
+No separate frontend framework. All UI is served by `agents/web_dashboard.py` — a single 2,897-line Flask file rendering HTML/CSS/JS as Python strings.
+
+**Access**: `http://34.45.46.60:8080` (login required)
+
+| Route | What it shows |
+|-------|--------------|
+| `/` | Live trading — open positions, LTP, P&L, greeks, LLM decision log |
+| `/screener` | Latest screener output (RS screener + momentum) |
+| `/screener/generate` | Triggers `screener_generator.py` on demand |
+| `/strategies` | Active strategy configs — view, edit, delete from `strategies.json` |
+| `/api/data?underlying=NIFTY&strategy_id=<id>` | Main data API — switches to replay mode if `strategy_id` starts with `bt_` |
+| `/api/replays` | List past replay sessions |
+| `/api/replay/start` | Launch a backtest replay (feeds data/catalog bars into agent pipeline) |
+| `/api/replay/stop` | Stop a running replay |
+
+**Replay mode**: When `strategy_id=bt_nifty_20250603_0942` is passed, the dashboard shows a replay progress banner and streams historical data instead of live. Watch a backtest play out in the same UI used for live trading.
+
+**Terminal alternative**: `agents/paper_dashboard.py` — same data via Rich library, runs in a screen session for low-overhead monitoring during live sessions.
+
+---
+
 ## Repository Structure
 
 ```
 autotrade/
 │
-├── agents/                         ← All trading agents
+├── agents/                         ← Trading agents + full UI stack
+│   │
+│   │   ── UI ──
+│   ├── web_dashboard.py            # Flask app (:8080) — all routes, all views, replay UI
+│   ├── paper_dashboard.py          # Rich terminal dashboard for live paper sessions
+│   ├── screener_generator.py       # Generates screener data (triggered by /screener/generate)
+│   │
+│   │   ── Morning pipeline ──
 │   ├── morning_brief.py            # 6am: TradingAgents + OI Analyst → morning_brief.json
 │   ├── oi_analyst.py               # PCR, max pain, OI walls, expected range, strategy rec
+│   ├── ta_config.py                # TradingAgents config (GPT-4o + GPT-4o-mini)
+│   │
+│   │   ── Live trading pipeline ──
 │   ├── start_strategy.py           # Entry: reads strategies.json → places CE+PE sells
+│   ├── entry_executor.py           # Entry logic with risk checks
 │   ├── position_manager.py         # Loop (every min): GPT-4o context → decision → execute
 │   ├── context_builder.py          # Builds ContextSnapshot (positions, VIX, OI, VWAP)
 │   ├── decision_executor.py        # Maps Decision JSON → OpenAlgo REST orders
 │   ├── decision_logger.py          # Writes every decision to data/decision_logs/ JSONL
-│   ├── entry_executor.py           # Entry logic with risk checks
 │   ├── session_memory.py           # In-session state across agents (module-level)
 │   ├── goal_schema.py              # Pydantic schemas: Decision, Goal, ContextSnapshot
-│   ├── ta_config.py                # TradingAgents config (GPT-4o + GPT-4o-mini)
-│   ├── web_dashboard.py            # Flask dashboard at :8080 — Trading/Screener/Strategies
-│   ├── paper_dashboard.py          # Rich terminal dashboard for live paper session
+│   │
+│   │   ── Strategies ──
 │   ├── mcx_strangle.py             # MCX options strangle (Gold, Silver, Crude)
 │   ├── rs_screener.py              # Relative strength screener vs Nifty 50
-│   ├── screener_generator.py       # Intraday momentum screener
-│   ├── backtest_replay.py          # Replay any historical day through live agent pipeline
+│   │
+│   │   ── Post-market + backtest ──
 │   ├── post_market.py              # EOD P&L summary and decision log review
-│   └── web_dashboard.py            # Flask: /trading /screener /strategies views
+│   └── backtest_replay.py          # Replay any historical day through live agent pipeline
 │
 ├── adapters/                       ← External API bridges
 │   ├── openalgo/                   # Nautilus Trader adapter for OpenAlgo
