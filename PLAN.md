@@ -1,492 +1,174 @@
 # Autotrade — Architecture & Build Plan
 
-> Living document. Updated as the project evolves.
-> Last updated: 2026-05-26
+> Living document. Last updated: 2026-06-18
 
 ---
 
-## Completed Setup (Pre-Phase 1)
+## What We Are Building
 
-Infrastructure and tooling completed before formal phases began.
-
-### VM & Orchestration
-- [x] GCP VM provisioned — e2-medium, 50GB SSD, us-central1-a, IP 34.45.46.60
-- [x] Hermes Agent v0.14.0 installed (`~/.local/bin/hermes`)
-- [x] Hermes configured with GPT-4o-mini via OpenAI (temporary — Qwen swap in Phase 1)
-- [x] Telegram gateway running as systemd service (`hermes-gateway`)
-- [x] Web dashboard running as systemd service (`hermes-dashboard`, port 9119)
-- [x] Caddy reverse proxy on port 80 with WebSocket fix (Host + Origin header rewrite)
-- [x] `terminal.cwd` set to `/home/freed/autotrade` in `~/.hermes/config.yaml`
-- [x] Hermes SOUL.md configured with project context and Claude Code rules
-
-### Claude Code
-- [x] Node.js 22 + Claude Code CLI installed on VM
-- [x] OAuth credentials copied from local machine (`~/.claude/.credentials.json`)
-- [x] Workspace trust pre-approved for `/home/freed/autotrade`
-- [x] GitHub deploy key (ed25519) added with write access to repo
-- [x] Claude Code → GitHub push confirmed working (Hermes delegates → Claude Code commits → push)
-
-### Memory Layers
-- [x] Hermes native memory: `MEMORY.md` + `USER.md` (active, `nudge_interval: 10`)
-- [x] Session history: `~/.hermes/state.db` SQLite with FTS5 full-text search
-- [x] Holographic memory provider enabled (`~/.hermes/memory_store.db`, `auto_extract: true`)
-- [x] `docs/memory-layers.md` — full memory architecture reference committed to repo
-
-### PostgreSQL (Agent Shared Memory)
-- [x] PostgreSQL 16 running as Docker container (`autotrade-postgres`, port 5432 localhost-only)
-- [x] `agent_memory` table live with upsert trigger and indexes (`migrations/init.sql`)
-- [x] `shared/db.py` — `memory_set / memory_get / memory_list / memory_delete` helpers
-- [x] `python3-psycopg2` installed system-wide on VM
-- [x] `.env` on VM: `POSTGRES_PASSWORD`, `EXECUTION_MODE`, `DATABASE_URL`
-- [x] Cross-agent memory test passed: Claude Code wrote → Hermes read via `psql`
+An autonomous trading system for NSE/BSE equities and options.
+- **Data source**: OpenAlgo (broker bridge) + ExpiryFlow (options data)
+- **Execution**: Paper trading now, live trading via OpenAlgo → Zerodha when ready
+- **AI layer**: Claude Code writes and runs all trading logic
+- **Interface**: Web dashboard (Flask, port 8080) + Telegram notifications
 
 ---
 
-## Vision
+## Current Stack (on GCP VM — us-central1-a)
 
-An autonomous trading system operated by three AI teams — a **Dev Team**, a **Trading Desk**, and a **Backtesting Team** — all orchestrated by Hermes and powered by Claude Code as the primary LLM engine.
-
----
-
-## Why Hermes + Claude Code Together
-
-This is not a choice between two tools. Each does something the other cannot.
-
-### Capability Split
-
-| Capability | Hermes (Qwen/GPT-4o-mini) | Claude Code |
-|-----------|--------------------------|-------------|
-| Persistent memory across sessions | ✓ MEMORY.md, Holographic fact store, session search | ✗ Stateless — forgets after each run |
-| Automatic skill creation | ✓ Saves reusable procedures after complex tasks | ✗ No skill library |
-| Self-improvement over time | ✓ Learns patterns, builds skills, improves routing | ✗ Same capability every run |
-| Telegram / mobile interface | ✓ Native gateway | ✗ CLI only |
-| Kanban task board (mobile visibility) | ✓ Built-in, accessible via browser | ✗ None |
-| Cron scheduling (market hours) | ✓ Native cron with IST schedule | ✗ None |
-| Code writing & multi-agent execution | ✗ Weak — GPT-4o-mini is a router, not a coder | ✓ Full coding intelligence, sub-agent spawning |
-| Multi-file understanding | ✗ Limited | ✓ Reads whole repos, writes precise diffs |
-| Running tests, git operations | ✗ Unreliable | ✓ First-class tools |
-
-### The Self-Improving Loop
-
-```
-Task arrives via Telegram
-         ↓
-Hermes checks memory: "Have I seen a task like this before?
-                        Is there a skill I can load?"
-         ↓
-Hermes creates Kanban card → routes to claude-dev profile
-         ↓
-claude-dev fires: claude -p "<task + skill context>" --max-turns 30
-         ↓
-Claude Code executes (writes code, tests, commits, pushes)
-         ↓
-claude-dev reads output → kanban_complete()
-         ↓
-Hermes saves what worked → updates skill / memory
-         ↓
-Next similar task: faster, better context, reuses the skill
-```
-
-Over time Hermes builds a library of skills:
-- `how-to-add-fastapi-endpoint`
-- `how-to-backtest-rsi-strategy`
-- `how-to-generate-eod-report`
-- `how-to-run-intraday-scan`
-
-Each skill gets refined as the system learns what instructions produce good Claude Code output.
-
-### Why Not Just Claude Code CLI Directly?
-
-Claude Code CLI on its own has no memory between runs, no scheduler, no mobile interface, and no way to build institutional knowledge over time. Every run starts from zero. Hermes provides the persistent layer that makes the system improve instead of repeat itself.
+| Component | Location | Status |
+|-----------|----------|--------|
+| OpenAlgo | `~/openalgo/` | Running — broker API bridge |
+| ExpiryFlow | `~/ExpiryFlow/` | Running — options chain data |
+| PostgreSQL 16 | Docker (`autotrade-postgres`) | Running — shared DB |
+| Web dashboard | `agents/web_dashboard.py` | Built — Flask, port 8080 |
+| Paper dashboard | `agents/paper_dashboard.py` | Built — terminal UI |
+| Claude Code CLI | `/usr/bin/claude` | Running — executes all AI tasks |
 
 ---
 
-## Guiding Principles
-
-- **Hermes (Qwen) = thin router only** — receives instructions, delegates, reports back. No heavy reasoning.
-- **Claude Code = the brain** — all development, all trading decisions, all backtesting. Maximises the Claude Pro subscription.
-- **The repo is for code only** — source code, strategy implementations, config, and thin daily summaries. No bulk data.
-- **PostgreSQL + TimescaleDB = shared memory** — all trade data, agent memory, market data, and performance metrics live in the DB. All agents read and write from it.
-- **Paper → Real with a flag** — every execution path built for real trading from day 1, gated by `EXECUTION_MODE=paper|live`.
-
----
-
-## System Architecture
-
-```
-                        YOU
-                         │ Telegram / Web Chat
-                         ▼
-                  HERMES / QWEN3-235B
-             ┌──────────┼────────────┐
-             │          │            │
-          [dev]     [trade]     [backtest]
-             │          │            │
-        Claude      Claude       Claude
-        Code        Code         Code
-        agents      agents       agents
-             │          │            │
-             └──────────┴────────────┘
-                    │           │
-              GIT REPO     PostgreSQL + TimescaleDB
-           (code only)     (all data — shared memory)
-```
-
----
-
-## Storage Architecture
-
-### What Goes Where
-
-| Data | Storage | Why |
-|------|---------|-----|
-| Source code, strategies, config | **Git repo** | Version controlled, reviewable, diffable |
-| Trade decision logs + reasoning | **PostgreSQL** | High frequency writes, queryable, never bloats repo |
-| Open positions, portfolio state | **PostgreSQL** | Real-time mutable state |
-| OHLCV market data | **TimescaleDB** | Time-series optimised, auto-partitioned by date |
-| Strategy performance metrics | **PostgreSQL** | Aggregatable — win rate, Sharpe, drawdown |
-| Backtest results | **PostgreSQL** | Queryable across strategies and time ranges |
-| Cross-agent shared memory | **PostgreSQL** | All agents can read/write — replaces Hermes file memory |
-| Daily P&L summary | **Git** (one markdown per day) | Human-readable, reviewable, tiny |
-| Backtest summary | **Git** (one markdown per run) | For review and strategy decisions |
-
-### Memory Layers
-
-| Layer | What it stores | Who writes | Who reads |
-|-------|----------------|------------|-----------|
-| **PostgreSQL: `agent_memory`** | Cross-session insights, strategy learnings, agent observations | All Claude Code agents, Hermes | All agents on next run |
-| **PostgreSQL: `trades`** | Every decision + full reasoning trace | Execution Agent | All agents, Hermes |
-| **TimescaleDB: `ohlcv`** | Historical + live market data | Data Agent | Strategy Agent, Backtest Agent |
-| **PostgreSQL: `strategy_performance`** | Aggregated stats per strategy | Updated after each trade/backtest | Risk Agent, Strategy Agent |
-| **Git repo** | Code, validated strategies, summaries | Dev agents | All agents |
-| **Claude Code run context** | In-run working memory | Claude Code itself | Within single run only |
-
----
-
-## Database Schema (draft)
-
-```sql
--- Every trade decision with full reasoning trace
-CREATE TABLE trades (
-    id              SERIAL PRIMARY KEY,
-    timestamp       TIMESTAMPTZ NOT NULL,
-    symbol          TEXT NOT NULL,
-    strategy        TEXT NOT NULL,
-    market_context  JSONB,          -- nifty level, VIX, breadth
-    signals         JSONB,          -- rsi, vwap_dev, volume_ratio etc
-    reasoning       TEXT,           -- full agent reasoning text
-    decision        TEXT,           -- BUY / SELL / HOLD
-    confidence      NUMERIC(4,2),
-    entry_price     NUMERIC(12,2),
-    stop_loss       NUMERIC(12,2),
-    target          NUMERIC(12,2),
-    risk_reward     NUMERIC(6,2),
-    position_size   INTEGER,
-    risk_amount_inr NUMERIC(12,2),
-    execution_mode  TEXT DEFAULT 'paper',   -- paper | live
-    status          TEXT DEFAULT 'open',    -- open | closed | cancelled
-    exit_price      NUMERIC(12,2),
-    pnl_inr        NUMERIC(12,2),
-    duration_mins   INTEGER,
-    closed_at       TIMESTAMPTZ
-);
-
--- Current open positions
-CREATE TABLE positions (
-    id           SERIAL PRIMARY KEY,
-    trade_id     INTEGER REFERENCES trades(id),
-    symbol       TEXT NOT NULL,
-    strategy     TEXT NOT NULL,
-    entry_time   TIMESTAMPTZ,
-    entry_price  NUMERIC(12,2),
-    quantity     INTEGER,
-    stop_loss    NUMERIC(12,2),
-    target       NUMERIC(12,2),
-    mode         TEXT DEFAULT 'paper',
-    status       TEXT DEFAULT 'open'
-);
-
--- OHLCV market data (TimescaleDB hypertable)
-CREATE TABLE ohlcv (
-    timestamp    TIMESTAMPTZ NOT NULL,
-    symbol       TEXT NOT NULL,
-    open         NUMERIC(12,2),
-    high         NUMERIC(12,2),
-    low          NUMERIC(12,2),
-    close        NUMERIC(12,2),
-    volume       BIGINT,
-    interval     TEXT            -- '1min' | '5min' | '1day'
-);
-SELECT create_hypertable('ohlcv', 'timestamp');
-
--- Per-strategy aggregated performance
-CREATE TABLE strategy_performance (
-    strategy        TEXT NOT NULL,
-    period          TEXT NOT NULL,   -- 'all' | 'month' | 'week'
-    total_trades    INTEGER,
-    win_rate        NUMERIC(5,2),
-    avg_rr          NUMERIC(6,2),
-    total_pnl_inr   NUMERIC(14,2),
-    max_drawdown    NUMERIC(5,2),
-    sharpe          NUMERIC(6,2),
-    last_updated    TIMESTAMPTZ,
-    PRIMARY KEY (strategy, period)
-);
-
--- Cross-agent shared memory (replaces Hermes file memory)
-CREATE TABLE agent_memory (
-    id           SERIAL PRIMARY KEY,
-    key          TEXT UNIQUE NOT NULL,
-    value        TEXT NOT NULL,
-    source_agent TEXT,           -- 'data-agent' | 'strategy-agent' | 'hermes' etc
-    created_at   TIMESTAMPTZ DEFAULT NOW(),
-    updated_at   TIMESTAMPTZ DEFAULT NOW(),
-    expires_at   TIMESTAMPTZ     -- NULL = permanent
-);
-
--- Backtest run results
-CREATE TABLE backtest_results (
-    id              SERIAL PRIMARY KEY,
-    run_at          TIMESTAMPTZ DEFAULT NOW(),
-    strategy        TEXT NOT NULL,
-    from_date       DATE,
-    to_date         DATE,
-    symbols         TEXT[],
-    total_trades    INTEGER,
-    win_rate        NUMERIC(5,2),
-    total_return_pct NUMERIC(8,2),
-    max_drawdown    NUMERIC(5,2),
-    sharpe          NUMERIC(6,2),
-    notes           TEXT,
-    approved        BOOLEAN DEFAULT FALSE  -- set to TRUE to allow paper trading
-);
-```
-
----
-
-## Teams
-
-### Team 1 — Dev Team
-
-**Mission**: Build and maintain the trading application, bots, data pipelines, and research tools.
-
-**How it works**:
-1. Task received via Telegram or web chat
-2. Hermes routes to Claude Code (`claude-code` skill) with `workdir=~/autotrade/dev/`
-3. Claude Code multi-agent executes: writes code, runs tests, commits, pushes
-4. Hermes reports completion back to Telegram
-
-**Typical tasks**:
-- Build new FastAPI endpoints
-- Implement a new strategy module
-- Write unit/integration tests
-- Research and prototype new indicators
-- Fix bugs, refactor, add DB migrations
-
-**Claude Code flags**: `--max-turns 20`, full tools (Read, Edit, Write, Bash)
-
----
-
-### Team 2 — Trading Desk
-
-**Mission**: Run mock and eventually live strategies on NSE/BSE equities. Generate P&L. Build a track record.
-
-**How it works**:
-1. Triggered by Hermes cron (market schedule) OR on-demand via Telegram
-2. Hermes routes to Claude Code with `workdir=~/autotrade/trading-desk/`
-3. Claude Code spawns sub-agents:
-
-```
-Claude Code (orchestrator)
-├── Data Agent      → fetch OHLCV from DB or live feed, compute indicators
-├── Strategy Agent  → read validated strategies from DB, generate BUY/SELL/HOLD
-├── Risk Agent      → check position limits, max daily loss, current drawdown
-└── Execution Agent → write trade to DB (paper mode) / call broker API (live mode)
-```
-
-4. Every decision written to `trades` table with full reasoning trace
-5. `agent_memory` updated with any new market observations
-6. Hermes reads summary from DB, sends to Telegram
-
-**Execution modes**: `paper` (default) → `live` (Phase 4, behind `EXECUTION_MODE` flag)
-
-**Broker API target**: Zerodha Kite Connect (NSE/BSE)
-
-#### Hermes Cron Schedule (IST)
-
-| Time | Days | Action |
-|------|------|--------|
-| 09:10 | Mon–Fri | Pre-market scan — breadth, VIX, gap analysis |
-| 09:20 | Mon–Fri | Intraday strategy run |
-| 14:30 | Mon–Fri | Positional signal review |
-| 15:20 | Mon–Fri | Close intraday positions |
-| 16:00 | Mon–Fri | EOD P&L report → write to DB → push Git summary → Telegram |
-| 18:00 | Mon–Fri | Backtesting run (off-market) |
-| 10:00 | Sat–Sun | Weekend deep backtest + strategy review |
-
----
-
-### Team 3 — Backtesting
-
-**Mission**: Continuously validate and improve strategies using historical data. Off-market hours.
-
-**How it works**:
-1. Triggered by Hermes cron (evenings / weekends)
-2. Claude Code reads historical OHLCV from TimescaleDB
-3. Runs strategy backtest
-4. Writes results to `backtest_results` table
-5. Updates `strategy_performance` table
-6. Sets `approved=TRUE` on strategies that meet thresholds
-7. Writes one-page markdown summary → commits to Git
-8. Updates `agent_memory` with key insights
-9. Hermes notifies via Telegram
-
-**Approval thresholds** (configurable):
-- Win rate > 45%
-- Sharpe > 0.8
-- Max drawdown < 15%
-- Min 30 trades in backtest period
-
----
-
-## Repository Structure (code only)
+## Repository Structure
 
 ```
 autotrade/
-├── PLAN.md
-├── README.md
-├── docker-compose.yml          ← PostgreSQL + TimescaleDB + Redis + app
-├── .env.example
+├── agents/                     ← Trading agents
+│   ├── web_dashboard.py        # Flask dashboard — Trading / Screener / Strategies
+│   ├── paper_dashboard.py      # Terminal dashboard for paper session
+│   ├── decision_executor.py    # Reads signals → places orders via OpenAlgo
+│   ├── position_manager.py     # Tracks open positions, trailing stops, exits
+│   ├── context_builder.py      # Builds market context (VIX, breadth, VWAP)
+│   ├── entry_executor.py       # Entry logic with risk checks
+│   ├── morning_brief.py        # Pre-market summary
+│   ├── oi_analyst.py           # Open interest analysis
+│   ├── mcx_strangle.py         # MCX options strangle strategy
+│   ├── screener_generator.py   # Intraday screener
+│   ├── rs_screener.py          # Relative strength screener
+│   ├── post_market.py          # EOD summary and P&L
+│   ├── backtest_replay.py      # Replay decisions on historical data
+│   ├── session_memory.py       # In-session state across agents
+│   ├── start_strategy.py       # Strategy launcher
+│   ├── ta_config.py            # TA indicator config
+│   ├── decision_logger.py      # Logs every decision to data/decision_logs/
+│   └── goal_schema.py          # Risk/goal config schema
 │
-├── dev/                        ← Dev Team workspace
-│   ├── api/                    # FastAPI backend
-│   │   ├── main.py
-│   │   ├── routers/
-│   │   └── models/
-│   ├── bots/                   # Bot source code
-│   ├── research/               # Exploratory scripts
-│   └── tests/
+├── adapters/                   ← External API bridges
+│   ├── openalgo/               # OpenAlgo REST API client
+│   │   ├── data_client.py      # OHLCV, quotes, option chain
+│   │   ├── execution_client.py # Place/modify/cancel orders
+│   │   ├── instrument_provider.py
+│   │   ├── factory.py
+│   │   └── config.py
+│   └── expiryflow_bridge/      # ExpiryFlow options data
+│       ├── bars.py
+│       ├── greeks.py
+│       ├── instruments.py
+│       ├── expiry_calendar.py
+│       └── convert.py
 │
-├── trading-desk/               ← Trading Desk workspace
-│   ├── strategies/
-│   │   ├── intraday/           # e.g. rsi_vwap, orb, vwap_bounce
-│   │   ├── positional/         # e.g. momentum, mean_reversion
-│   │   └── validated/          # Symlinks or copies of DB-approved strategies
-│   ├── broker/
-│   │   ├── zerodha.py          # Kite Connect integration
-│   │   └── paper.py            # Paper trading engine
-│   ├── data/
-│   │   ├── nse.py              # NSE OHLCV fetcher
-│   │   └── indicators.py       # Technical indicators
-│   ├── risk/
-│   │   ├── position_sizer.py
-│   │   └── rules.yaml
-│   ├── runner.py               # Main entry point
-│   └── reports/                # Git-committed daily/backtest summaries
-│       ├── daily/              # YYYY-MM-DD.md
-│       └── backtest/           # <strategy>_<date>.md
+├── strategies/                 ← Strategy implementations
+│   ├── equity/
+│   │   └── ema_crossover.py
+│   └── options/
+│       └── iron_condor.py
 │
-├── shared/                     ← Shared across teams
-│   ├── db.py                   # SQLAlchemy engine + session (shared DB connection)
-│   ├── models.py               # Pydantic + SQLAlchemy models
-│   ├── indicators.py           # Technical indicators library
-│   ├── utils.py
-│   └── config.py               # Centralised config from env vars
+├── shared/                     ← Shared utilities
+│   ├── db.py                   # PostgreSQL helpers (agent_memory read/write)
+│   ├── log_tokens.py           # Print Claude Code token usage after each task
+│   └── write_task_memory.py    # Write task completion to agent_memory table
 │
-└── migrations/                 ← Alembic DB migrations
-    └── versions/
+├── migrations/
+│   └── init.sql                # agent_memory + task_tokens tables
+│
+├── docs/
+│   ├── memory-layers.md
+│   └── agent_decision_rules.md
+│
+├── gcp/
+│   └── vm-details.md
+│
+├── docker-compose.yml          ← PostgreSQL container
+└── .env.example
 ```
 
 ---
 
-## Infrastructure (Docker Compose)
+## Database (PostgreSQL — Docker)
 
-```yaml
-services:
-  postgres:          # PostgreSQL 16 + TimescaleDB extension
-  redis:             # Cache + message broker
-  trading-app:       # FastAPI + Playwright/Chromium
+```
+host: localhost:5432
+db:   autotrade
+user: autotrade
+pass: (in .env)
 ```
 
-All on the same GCP VM (e2-medium, 4GB RAM, 50GB disk).
+### Live tables
+
+| Table | Purpose |
+|-------|---------|
+| `agent_memory` | Cross-session key-value store — all agents read/write |
+| `task_tokens` | Per-task Claude Code token usage log |
+
+### Planned tables (next)
+
+| Table | Purpose |
+|-------|---------|
+| `trades` | Every decision with full reasoning trace |
+| `positions` | Open positions state |
+| `ohlcv` | Historical market data (TimescaleDB hypertable) |
+| `strategy_performance` | Aggregated win rate, Sharpe, drawdown per strategy |
+| `backtest_results` | Backtest run history |
 
 ---
 
-## Hermes Configuration
+## Data Flow
 
-### LLM
-- **Model**: `qwen/qwen3-235b-a22b` via OpenRouter
-- **Role**: Orchestration and routing only
-- **Fallback**: `qwen/qwen-2.5-72b-instruct`
-
-### Profiles
-
-| Profile | SOUL.md focus | terminal.cwd |
-|---------|--------------|--------------|
-| `dev-team` | Build features, write tests, commit. Always run tests before committing. | `~/autotrade/dev/` |
-| `trading-desk` | Execute strategies, manage risk, write full reasoning to DB on every decision | `~/autotrade/trading-desk/` |
-
-### Claude Code Invocation per Team
-
-**Dev Team**:
 ```
-claude -p "<task>" --workdir ~/autotrade/dev/ --max-turns 20
-```
+OpenAlgo (broker bridge)
+    └── adapters/openalgo/  ←→  agents/decision_executor.py
+                                agents/entry_executor.py
+                                agents/position_manager.py
 
-**Trading Desk / Backtest**:
-```
-claude -p "<task>" --workdir ~/autotrade/trading-desk/ --max-turns 10
+ExpiryFlow (options data)
+    └── adapters/expiryflow_bridge/  ←→  agents/oi_analyst.py
+                                         agents/mcx_strangle.py
+
+agents/web_dashboard.py  →  http://<VM>:8080  (Trading / Screener / Strategies)
+agents/paper_dashboard.py  →  terminal UI during paper session
+
+All decisions  →  data/decision_logs/  (JSONL, not in git)
+Agent memory  →  PostgreSQL agent_memory table
 ```
 
 ---
 
-## Build Phases
+## Execution Mode
 
-### Phase 1 — Foundation
-- [ ] Switch Hermes LLM → Qwen3-235b via OpenRouter *(needs OpenRouter API key)*
-- [ ] Create `dev-team` and `trading-desk` Hermes profiles with SOUL.md
-- [x] Restructure repo: `shared/`, `migrations/` created; `dev/`, `trading-desk/` pending
-- [x] Configure `terminal.cwd` — set to `/home/freed/autotrade` in `~/.hermes/config.yaml`
-- [ ] Set up Hermes cron placeholders (IST market schedule, disabled)
-
-### Phase 2 — Data & Infrastructure
-- [x] Docker Compose: PostgreSQL 16 container running (`autotrade-postgres`)
-- [ ] Upgrade to TimescaleDB (needed for OHLCV hypertable in Phase 4)
-- [ ] Add Redis to docker-compose.yml
-- [ ] DB schema migrations (Alembic) — full table set from schema above
-- [x] `shared/db.py` — psycopg2 helpers for `agent_memory` (SQLAlchemy upgrade optional later)
-- [x] `agent_memory` table live and tested
-- [ ] NSE OHLCV data fetcher (`trading-desk/data/nse.py`)
-- [ ] Shared indicators library (`shared/indicators.py`)
-- [ ] Seed historical OHLCV into TimescaleDB (Nifty 50 stocks, 1-year)
-
-### Phase 3 — Dev Team Pipeline
-- [ ] FastAPI skeleton (`dev/api/`) with DB connection
-- [ ] Paper trading engine (`trading-desk/broker/paper.py`) — writes to `trades` table
-- [ ] Risk rules (`trading-desk/risk/rules.yaml` + `position_sizer.py`)
-- [x] Agent memory read/write helpers in `shared/db.py` — done (`memory_set/get/list/delete`)
-
-### Phase 4 — Trading Desk (Paper)
-- [ ] First intraday strategy: RSI + VWAP (`trading-desk/strategies/intraday/rsi_vwap.py`)
-- [ ] Backtesting framework — runs against TimescaleDB OHLCV
-- [ ] Enable Hermes cron (market schedule)
-- [ ] EOD report: query DB → generate markdown → commit → Telegram
-
-### Phase 5 — Real Execution
-- [ ] Zerodha Kite Connect integration (`trading-desk/broker/zerodha.py`)
-- [ ] `EXECUTION_MODE=paper|live` flag wired end-to-end
-- [ ] Enhanced risk controls: daily loss circuit breaker, max open positions
-- [ ] Kill switch via Telegram: "stop all trading"
+Controlled by `EXECUTION_MODE` in `.env`:
+- `paper` — orders routed to OpenAlgo Analyze Mode (sandbox, no real fills)
+- `live` — real orders sent to broker
 
 ---
 
-## Open Decisions
+## What's Working Now
 
-| Decision | Status | Notes |
-|----------|--------|-------|
-| OpenRouter API key | Pending | Need before Phase 1 LLM switch |
-| Zerodha Kite Connect account | Future | Phase 5 real execution |
-| Watchlist for intraday | TBD | Nifty 50 stocks? F&O stocks? |
-| Strategy selection for Phase 4 | TBD | RSI+VWAP confirmed as first candidate |
-| Telegram routing | TBD | One group with [dev]/[trade] prefix vs two separate groups |
-| Historical data source | TBD | `nsepython`, `yfinance`, or NSE official API |
+- [x] Web dashboard running — positions, screener, strategies views
+- [x] Paper dashboard (terminal) for live session monitoring
+- [x] OpenAlgo adapter — quotes, OHLCV, order placement
+- [x] ExpiryFlow bridge — options chain, greeks, expiry calendar
+- [x] Decision executor + position manager + entry executor
+- [x] Morning brief, OI analyst, screener, post-market agents
+- [x] MCX strangle strategy
+- [x] EMA crossover (equity), Iron condor (options) strategies
+- [x] agent_memory table — Claude Code writes task facts after each run
+- [x] Claude Code credential auto-refresh (daily cron + Secret Manager on restart)
+
+---
+
+## What's Next
+
+- [ ] `trades` table — log every decision with full reasoning to DB
+- [ ] EOD P&L report — query DB → markdown → commit → Telegram
+- [ ] TimescaleDB upgrade for OHLCV hypertable
+- [ ] Zerodha Kite Connect wired to OpenAlgo for live execution
+- [ ] Scheduled intraday runs (Claude Code triggered on market schedule)
+- [ ] Backtest framework against historical OHLCV
