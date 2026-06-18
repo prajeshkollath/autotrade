@@ -204,12 +204,19 @@ autotrade/
        ├─ Compute P&L, win/loss, avg holding time
        └─ Write EOD summary
 
-Anytime (backtest)
+Anytime — Agent replay (backtest_replay.py)
   └─ backtest_replay.py --date YYYY-MM-DD
-       ├─ Loads Nautilus Trader Parquet catalog (data/catalog/)
-       ├─ Replays historical 5-min bars through the same pipeline
-       ├─ Position manager runs on historical context (no real orders)
-       └─ Produces decision log for review
+       ├─ Loads NT Parquet catalog (data/catalog/) for historical option bars
+       ├─ Feeds bars into the live agent pipeline (position_manager, decision_executor)
+       ├─ No real orders placed — simulates what the agent would have done
+       └─ Produces decision log for review at data/decision_logs/
+
+Anytime — Strategy backtest (iron_condor.py)
+  └─ strategies/options/iron_condor.py --from 2025-09-01 --to 2026-06-03
+       ├─ Queries ExpiryFlow DuckDB (options_data.duckdb) for strikes + greeks
+       ├─ Loads NT Parquet catalog for OHLCV bars
+       ├─ Runs NT BacktestEngine → Strategy class handles on_bar() events
+       └─ Produces full P&L, trade history, metrics
 ```
 
 ---
@@ -227,29 +234,93 @@ Anytime (backtest)
 
 ---
 
-## Nautilus Trader Role
+## Two Separate Execution Paths
 
-Nautilus Trader is used as a **framework**, not as the live execution engine directly:
+The system has two distinct paths that do **not** share code today:
 
-- **`adapters/openalgo/`** — implements NT's `LiveDataClient` and `LiveExecutionClient` interfaces, so OpenAlgo becomes a proper NT venue
-- **`data/catalog/`** — NT's Parquet data catalog stores historical OHLCV + option data
-- **`backtest_replay.py`** — uses NT's `ParquetDataCatalog` to load historical bars for replay backtesting
-- **Future**: full NT node (TradingNode) could replace the manual position manager loop
+### Path 1 — Live / Sandbox (custom agents)
+
+```
+agents/position_manager.py  (GPT-4o decides every 60s)
+    └── agents/decision_executor.py
+            └── requests.post("http://localhost:5000/api/v1/placeorder")
+                    └── OpenAlgo (localhost:5000)
+                            ├── Analyze Mode ON  → SQLite sandbox (no real fills)
+                            └── Analyze Mode OFF → Zerodha Kite Connect (live)
+```
+
+No Nautilus Trader in this path. Pure Python + OpenAlgo REST.
+
+### Path 2 — Strategy Backtesting (Nautilus Trader + DuckDB)
+
+Used by `strategies/options/iron_condor.py` (and future strategies):
+
+```
+ExpiryFlow/backend/options_data.duckdb  (240MB)
+    └── Queried via DuckDB to get:
+         - Monday spot prices → which strikes to trade each week
+         - Greeks at entry/exit (delta/theta/vega from Black-Scholes)
+         - Instrument definitions for the 4 legs
+
+data/catalog/  (297MB — Nautilus Trader Parquet)
+    └── Loaded via NT ParquetDataCatalog to get:
+         - Historical OHLCV bars for each option contract
+
+NT BacktestEngine
+    └── Runs the Strategy class bar-by-bar
+         - on_bar() → entry/exit logic
+         - Places virtual orders → tracks fills, P&L
+         - Produces full trade history + metrics
+```
+
+The iron condor backtest (`strategies/options/iron_condor.py`) is the only strategy
+using this path. Run with:
+```bash
+cd ~/autotrade
+.venv/bin/python strategies/options/iron_condor.py --from 2025-09-01 --to 2026-06-03
+```
+
+### The Gap
+
+The same strategy logic can't run in both paths without a rewrite.
+`position_manager.py` is built for live trading (loop + LLM + OpenAlgo REST).
+`iron_condor.py` is built for backtesting (NT Strategy class + DuckDB + Parquet).
+
+**Future option**: migrate `position_manager.py` to a proper NT `Strategy` class,
+then plug in `adapters/openalgo/` as the live venue. Same code would then run
+in both `BacktestEngine` and `TradingNode`. The adapter is already built for this.
+
+### Nautilus Trader Components — What's Used vs Built
+
+| Component | Status | Used By |
+|-----------|--------|---------|
+| `BacktestEngine` | **Used** | `strategies/options/iron_condor.py` |
+| `ParquetDataCatalog` | **Used** | `iron_condor.py`, `backtest_replay.py` |
+| `adapters/openalgo/` (LiveDataClient + LiveExecClient) | **Built, not wired** | Nothing yet — ready for NT live trading |
+| `TradingNode` | **Not used** | Future — would replace the manual loop |
+
+### VectorBT (equity backtesting)
+
+Separate from NT. Used for equity strategy backtesting via `skills/vectorbt/`:
+- Reads data from yfinance / CSV
+- Signal-based vectorized backtests (EMA crossover, RSI, dual momentum, etc.)
+- Does not use DuckDB or NT catalog — independent stack
 
 ---
 
 ## Data Storage
 
-| Data | Location | In Git |
-|------|----------|--------|
-| Source code, strategies | GitHub repo | Yes |
-| Historical OHLCV (Parquet) | `data/catalog/` (NT catalog) | No — 297MB |
-| Daily decision logs | `data/decision_logs/` JSONL | No — runtime |
-| Morning briefs | `data/morning_briefs/` JSON | No — runtime |
-| Active strategy configs | `data/strategies.json` | No — runtime state |
-| Cross-agent memory | PostgreSQL `agent_memory` | No — DB |
-| Task token logs | PostgreSQL `task_tokens` | No — DB |
-| OpenAlgo instrument master | `~/openalgo/db/openalgo.db` | No — external |
+| Data | Location | Size | In Git |
+|------|----------|------|--------|
+| Source code, strategies | GitHub repo | ~2MB | Yes |
+| Historical options data (DuckDB) | `~/ExpiryFlow/backend/options_data.duckdb` | 240MB | No — ExpiryFlow |
+| Historical OHLCV bars (NT Parquet) | `data/catalog/` | 297MB | No |
+| Daily decision logs | `data/decision_logs/` JSONL | 2.4MB | No — runtime |
+| Morning briefs | `data/morning_briefs/` JSON | 536KB | No — runtime |
+| Active strategy configs | `data/strategies.json` | <1KB | No — runtime state |
+| Cross-agent memory | PostgreSQL `agent_memory` | — | No — DB |
+| Task token logs | PostgreSQL `task_tokens` | — | No — DB |
+| OpenAlgo instrument master | `~/openalgo/db/openalgo.db` | — | No — external |
 
 ---
 
