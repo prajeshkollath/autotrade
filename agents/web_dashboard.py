@@ -42,6 +42,7 @@ _NAV_BAR = """
   <a href="/" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-trading">&#128200; Trading</a>
   <a href="/screener" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-screener">&#128269; Screener</a>
   <a href="/strategies" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-strategies">&#127919; Strategies</a>
+  <a href="/data" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-data">&#128190; Data</a>
   <span style="margin-left:auto;font-size:11px;color:#6c7086;padding:12px 0">
     <a href="/logout" style="color:#f38ba8;text-decoration:none;font-size:11px">Logout</a>
   </span>
@@ -49,8 +50,8 @@ _NAV_BAR = """
 <script>
 (function(){{
   const path = window.location.pathname;
-  const map = {{'/':'nav-trading','/screener':'nav-screener','/strategies':'nav-strategies'}};
-  const id = map[path] || (path.startsWith('/screener') ? 'nav-screener' : null);
+  const map = {{'/':'nav-trading','/screener':'nav-screener','/strategies':'nav-strategies','/data':'nav-data'}};
+  const id = map[path] || (path.startsWith('/screener') ? 'nav-screener' : path.startsWith('/data') ? 'nav-data' : null);
   if (id) {{ const el = document.getElementById(id); if(el) el.style.cssText += ';color:#89b4fa;border-bottom-color:#89b4fa;font-weight:600'; }}
 }})();
 </script>
@@ -249,6 +250,7 @@ HTML = r"""<!DOCTYPE html>
   <a href="/" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-trading">&#128200; Trading</a>
   <a href="/screener" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-screener">&#128269; Screener</a>
   <a href="/strategies" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-strategies">&#127919; Strategies</a>
+  <a href="/data" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-data">&#128190; Data</a>
   <span style="margin-left:auto;font-size:11px;color:#6c7086;padding:12px 0">
     <a href="/logout" style="color:#f38ba8;text-decoration:none;font-size:11px">Logout</a>
   </span>
@@ -256,8 +258,8 @@ HTML = r"""<!DOCTYPE html>
 <script>
 (function(){
   const path = window.location.pathname;
-  const map = {'/':'nav-trading','/screener':'nav-screener','/strategies':'nav-strategies'};
-  const id = map[path] || (path.startsWith('/screener') ? 'nav-screener' : null);
+  const map = {'/':'nav-trading','/screener':'nav-screener','/strategies':'nav-strategies','/data':'nav-data'};
+  const id = map[path] || (path.startsWith('/screener') ? 'nav-screener' : path.startsWith('/data') ? 'nav-data' : null);
   if (id) { const el = document.getElementById(id); if(el) el.style.cssText += ';color:#89b4fa;border-bottom-color:#89b4fa;font-weight:600'; }
 })();
 </script>
@@ -2270,6 +2272,7 @@ STRATEGIES_HUB_HTML = """<!DOCTYPE html>
   <a href="/" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-trading">&#128200; Trading</a>
   <a href="/screener" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-screener">&#128269; Screener</a>
   <a href="/strategies" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-strategies">&#127919; Strategies</a>
+  <a href="/data" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-data">&#128190; Data</a>
   <span style="margin-left:auto;font-size:11px;color:#6c7086;padding:12px 0">
     <a href="/logout" style="color:#f38ba8;text-decoration:none;font-size:11px">Logout</a>
   </span>
@@ -2277,8 +2280,8 @@ STRATEGIES_HUB_HTML = """<!DOCTYPE html>
 <script>
 (function(){
   const path = window.location.pathname;
-  const map = {'/':'nav-trading','/screener':'nav-screener','/strategies':'nav-strategies'};
-  const id = map[path] || (path.startsWith('/screener') ? 'nav-screener' : null);
+  const map = {'/':'nav-trading','/screener':'nav-screener','/strategies':'nav-strategies','/data':'nav-data'};
+  const id = map[path] || (path.startsWith('/screener') ? 'nav-screener' : path.startsWith('/data') ? 'nav-data' : null);
   if (id) { const el = document.getElementById(id); if(el) el.style.cssText += ';color:#89b4fa;border-bottom-color:#89b4fa;font-weight:600'; }
 })();
 </script>
@@ -2881,6 +2884,339 @@ setInterval(loadStrategies, 15000);
 </body>
 </html>
 """
+
+# ── Data Management ────────────────────────────────────────────────────────
+
+import subprocess
+import threading
+
+_sync_state = {"running": False, "log": [], "error": None}
+_sync_lock  = threading.Lock()
+
+ENV_PATH = Path("/home/freed/autotrade/.env")
+
+
+def _update_env_token(token: str) -> None:
+    """Update DHAN_ACCESS_TOKEN in .env, adding line if missing."""
+    lines = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith("DHAN_ACCESS_TOKEN="):
+            lines[i] = f"DHAN_ACCESS_TOKEN={token}"
+            found = True
+            break
+    if not found:
+        lines.append(f"DHAN_ACCESS_TOKEN={token}")
+    ENV_PATH.write_text("\n".join(lines) + "\n")
+
+
+def _run_sync_bg(from_date: str, to_date: str) -> None:
+    """Run dhan_ohlcv_sync in a background thread, capturing output."""
+    with _sync_lock:
+        _sync_state["running"] = True
+        _sync_state["log"]     = []
+        _sync_state["error"]   = None
+
+    cmd = [
+        "/home/freed/autotrade/.venv/bin/python",
+        "/home/freed/autotrade/agents/dhan_ohlcv_sync.py",
+        "--backfill",
+        "--from-date", from_date,
+        "--to-date",   to_date,
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ, "HOME": "/home/freed"},
+            cwd="/home/freed/autotrade",
+        )
+        for line in proc.stdout:
+            with _sync_lock:
+                _sync_state["log"].append(line.rstrip())
+        proc.wait()
+        if proc.returncode != 0:
+            with _sync_lock:
+                _sync_state["error"] = f"exited with code {proc.returncode}"
+    except Exception as exc:
+        with _sync_lock:
+            _sync_state["error"] = str(exc)
+    finally:
+        with _sync_lock:
+            _sync_state["running"] = False
+
+
+def _data_coverage() -> dict:
+    """Query daily_ohlcv for coverage summary."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, "/home/freed/autotrade")
+        from shared.db import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        COUNT(DISTINCT symbol) AS symbols,
+                        COUNT(*)               AS total_rows,
+                        MIN(trade_date)        AS earliest,
+                        MAX(trade_date)        AS latest
+                    FROM daily_ohlcv
+                """)
+                row = cur.fetchone()
+        if row and row[3]:
+            from datetime import date
+            today = date.today()
+            gap   = (today - row[3]).days
+            return {
+                "symbols":  row[0],
+                "rows":     row[1],
+                "earliest": str(row[2]),
+                "latest":   str(row[3]),
+                "gap_days": max(gap - 1, 0),
+                "ok": True,
+            }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "symbols": 0, "rows": 0, "earliest": None, "latest": None, "gap_days": 0}
+
+
+@app.route("/data")
+@login_required
+def data_page():
+    return DATA_PAGE_HTML
+
+
+@app.route("/api/data/status")
+@login_required
+def api_data_status():
+    coverage = _data_coverage()
+    with _sync_lock:
+        state = dict(_sync_state)
+        state["log"] = state["log"][-200:]
+    return jsonify({**coverage, **state})
+
+
+@app.route("/api/data/download", methods=["POST"])
+@login_required
+def api_data_download():
+    body  = request.json or {}
+    token = (body.get("token") or "").strip()
+
+    with _sync_lock:
+        if _sync_state["running"]:
+            return jsonify({"error": "Sync already running"}), 409
+
+    if token:
+        try:
+            _update_env_token(token)
+        except Exception as exc:
+            return jsonify({"error": f"Could not update .env: {exc}"}), 500
+
+    coverage = _data_coverage()
+    from datetime import date, timedelta
+    today     = date.today()
+    yesterday = today - timedelta(days=1)
+
+    if coverage.get("latest"):
+        from_date = str(date.fromisoformat(coverage["latest"]) + timedelta(days=1))
+    else:
+        from_date = str(today - timedelta(days=365))
+
+    to_date = str(yesterday)
+
+    if from_date > to_date:
+        return jsonify({"ok": True, "message": "Data already up to date"})
+
+    t = threading.Thread(target=_run_sync_bg, args=(from_date, to_date), daemon=True)
+    t.start()
+    return jsonify({"ok": True, "from_date": from_date, "to_date": to_date})
+
+
+DATA_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Data Management</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px}
+.nav{background:#161b22;border-bottom:1px solid #30363d;display:flex;align-items:center;padding:0 20px;height:44px}
+.nav-brand{font-weight:700;color:#89b4fa;font-size:13px;margin-right:24px}
+.page{max-width:860px;margin:0 auto;padding:28px 20px}
+h2{font-size:1.1em;font-weight:700;margin-bottom:4px}
+.sub{color:#8b949e;font-size:.82em;margin-bottom:24px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px;margin-bottom:20px}
+.card h3{font-size:.9em;font-weight:700;color:#89b4fa;text-transform:uppercase;letter-spacing:.05em;margin-bottom:14px}
+.stat-row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:0}
+.stat{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px 16px;min-width:130px}
+.stat-val{font-size:1.5em;font-weight:700}
+.stat-lbl{font-size:.75em;color:#8b949e;margin-top:2px}
+.gap-val{color:#f0883e}
+.ok-val{color:#3fb950}
+label{display:block;font-size:.8em;color:#8b949e;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+textarea{width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e6edf3;
+  font-family:monospace;font-size:.8em;padding:10px 12px;resize:vertical;min-height:72px;outline:none}
+textarea:focus{border-color:#89b4fa}
+textarea::placeholder{color:#484f58}
+.row{display:flex;gap:10px;align-items:flex-start;margin-top:14px}
+.btn{background:#238636;color:#fff;border:none;border-radius:6px;padding:10px 22px;
+  font-size:.88em;font-weight:600;cursor:pointer;white-space:nowrap}
+.btn:hover{background:#2ea043}
+.btn:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+.btn-secondary{background:#21262d;color:#e6edf3}
+.btn-secondary:hover{background:#30363d}
+.status-badge{display:inline-flex;align-items:center;gap:6px;font-size:.8em;padding:4px 10px;
+  border-radius:12px;margin-bottom:14px}
+.badge-idle{background:#21262d;color:#8b949e}
+.badge-running{background:#1a3a1a;color:#3fb950;border:1px solid #238636}
+.badge-error{background:#3a1a1a;color:#f85149;border:1px solid #da3633}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.dot.pulse{animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.log-box{background:#0d1117;border:1px solid #21262d;border-radius:6px;
+  font-family:monospace;font-size:.78em;color:#8b949e;padding:12px;
+  height:280px;overflow-y:auto;white-space:pre-wrap;margin-top:14px}
+.log-box .ok{color:#3fb950}
+.log-box .err{color:#f85149}
+.hint{font-size:.78em;color:#8b949e;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="nav">
+  <span class="nav-brand">&#9889; AutoTrade</span>
+  <a href="/" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-trading">&#128200; Trading</a>
+  <a href="/screener" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-screener">&#128269; Screener</a>
+  <a href="/strategies" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-strategies">&#127919; Strategies</a>
+  <a href="/data" style="padding:12px 16px;font-size:12px;text-decoration:none;color:#cdd6f4;border-bottom:2px solid transparent" id="nav-data">&#128190; Data</a>
+</div>
+<script>
+(function(){
+  const path = window.location.pathname;
+  const map = {'/':'nav-trading','/screener':'nav-screener','/strategies':'nav-strategies','/data':'nav-data'};
+  const id = map[path] || (path.startsWith('/data') ? 'nav-data' : null);
+  if (id) { const el = document.getElementById(id); if(el) el.style.cssText += ';color:#89b4fa;border-bottom-color:#89b4fa;font-weight:600'; }
+})();
+</script>
+
+<div class="page">
+  <h2>F&amp;O Daily Data</h2>
+  <div class="sub">Dhan API &mdash; daily OHLCV for all NSE F&amp;O stocks &rarr; PostgreSQL</div>
+
+  <!-- Coverage card -->
+  <div class="card">
+    <h3>Data Coverage</h3>
+    <div id="badge" class="status-badge badge-idle"><span class="dot"></span> <span id="badge-txt">Idle</span></div>
+    <div class="stat-row" id="stats">
+      <div class="stat"><div class="stat-val" id="s-symbols">—</div><div class="stat-lbl">F&amp;O Stocks</div></div>
+      <div class="stat"><div class="stat-val" id="s-rows">—</div><div class="stat-lbl">Total Rows</div></div>
+      <div class="stat"><div class="stat-val" id="s-earliest">—</div><div class="stat-lbl">Earliest Date</div></div>
+      <div class="stat"><div class="stat-val" id="s-latest">—</div><div class="stat-lbl">Latest Date</div></div>
+      <div class="stat"><div class="stat-val gap-val" id="s-gap">—</div><div class="stat-lbl">Days Missing</div></div>
+    </div>
+  </div>
+
+  <!-- Download card -->
+  <div class="card">
+    <h3>Download Data</h3>
+    <label>Dhan Access Token</label>
+    <textarea id="token-input" rows="3" placeholder="Paste your Dhan access token here (from Dhan portal → API section)&#10;Leave blank to use the token already saved in .env"></textarea>
+    <div class="hint">Token is saved to .env on the VM and used for the download. Leave blank if already saved.</div>
+    <div class="row">
+      <button class="btn" id="btn-download" onclick="startDownload()">&#11015; Download Missing Data</button>
+      <button class="btn btn-secondary" onclick="loadStatus()">&#8635; Refresh Status</button>
+    </div>
+    <div class="log-box" id="log-box"><span style="color:#484f58">Log output will appear here...</span></div>
+  </div>
+</div>
+
+<script>
+let _polling = null;
+
+async function loadStatus() {
+  const r = await fetch('/api/data/status');
+  const d = await r.json();
+  if (!d.ok && d.error) {
+    document.getElementById('s-symbols').textContent = 'DB error';
+    return;
+  }
+  document.getElementById('s-symbols').textContent  = d.symbols ?? '0';
+  document.getElementById('s-rows').textContent     = (d.rows ?? 0).toLocaleString();
+  document.getElementById('s-earliest').textContent = d.earliest ?? '—';
+  document.getElementById('s-latest').textContent   = d.latest   ?? '—';
+  const gap = d.gap_days ?? 0;
+  document.getElementById('s-gap').textContent = gap === 0 ? '0 ✓' : gap;
+  document.getElementById('s-gap').style.color = gap === 0 ? '#3fb950' : '#f0883e';
+
+  const badge    = document.getElementById('badge');
+  const badgeTxt = document.getElementById('badge-txt');
+  const btn      = document.getElementById('btn-download');
+
+  if (d.running) {
+    badge.className = 'status-badge badge-running';
+    badge.querySelector('.dot').className = 'dot pulse';
+    badgeTxt.textContent = 'Syncing...';
+    btn.disabled = true;
+    if (!_polling) _polling = setInterval(loadStatus, 2000);
+  } else {
+    if (_polling) { clearInterval(_polling); _polling = null; }
+    btn.disabled = false;
+    if (d.error) {
+      badge.className = 'status-badge badge-error';
+      badge.querySelector('.dot').className = 'dot';
+      badgeTxt.textContent = 'Error: ' + d.error;
+    } else {
+      badge.className = 'status-badge badge-idle';
+      badge.querySelector('.dot').className = 'dot';
+      badgeTxt.textContent = gap === 0 ? 'Up to date' : 'Idle';
+    }
+  }
+
+  // Update log
+  const log = d.log || [];
+  if (log.length) {
+    const box = document.getElementById('log-box');
+    box.innerHTML = log.map(l => {
+      const cls = l.includes('ERROR') ? 'err' : l.includes('Done') || l.includes('done') ? 'ok' : '';
+      return `<span class="${cls}">${escHtml(l)}</span>`;
+    }).join('\\n');
+    box.scrollTop = box.scrollHeight;
+  }
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function startDownload() {
+  const token = document.getElementById('token-input').value.trim();
+  document.getElementById('log-box').innerHTML = '<span style="color:#484f58">Starting sync...</span>';
+  const r = await fetch('/api/data/download', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({token})
+  });
+  const d = await r.json();
+  if (!r.ok || d.error) {
+    document.getElementById('log-box').innerHTML = '<span class="err">Error: ' + escHtml(d.error || 'unknown') + '</span>';
+    return;
+  }
+  if (d.message) {
+    document.getElementById('log-box').innerHTML = '<span class="ok">' + escHtml(d.message) + '</span>';
+    loadStatus();
+    return;
+  }
+  // Started — poll for progress
+  loadStatus();
+}
+
+loadStatus();
+</script>
+</body>
+</html>"""
+
 
 if __name__ == "__main__":
     if not API_KEY:
