@@ -1183,10 +1183,35 @@ def screener_page():
     content = open(latest).read()
     date_label = Path(latest).stem
     regenerate_bar = f"""
-<div style="background:#1e1e2e;padding:6px 20px;display:flex;align-items:center;gap:16px;font-size:12px;color:#a6adc8;border-bottom:1px solid #313244">
+<div id="regen-bar" style="background:#1e1e2e;padding:6px 20px;display:flex;align-items:center;gap:16px;font-size:12px;color:#a6adc8;border-bottom:1px solid #313244">
   <span>Last generated: <b style="color:#cdd6f4">{date_label}</b></span>
-  <a href="/screener/generate" style="background:#89b4fa;color:#1e1e2e;padding:4px 14px;border-radius:4px;text-decoration:none;font-weight:600">&#8635; Regenerate</a>
-</div>"""
+  <button id="regen-btn" onclick="startRegen()" style="background:#89b4fa;color:#1e1e2e;padding:4px 14px;border-radius:4px;border:none;cursor:pointer;font-weight:600;font-size:12px">&#8635; Regenerate</button>
+  <span id="regen-status" style="color:#a6adc8"></span>
+</div>
+<script>
+function startRegen(){{
+  var btn=document.getElementById('regen-btn');
+  var st=document.getElementById('regen-status');
+  btn.disabled=true; btn.style.opacity='0.5';
+  st.textContent='Generating... (30-60s)';
+  fetch('/api/screener/generate',{{method:'POST'}}).then(function(r){{
+    if(r.status===409){{ st.textContent='Already running...'; pollRegen(); return; }}
+    pollRegen();
+  }}).catch(function(e){{ st.textContent='Error: '+e; btn.disabled=false; btn.style.opacity='1'; }});
+}}
+function pollRegen(){{
+  setTimeout(function(){{
+    fetch('/api/screener/status').then(function(r){{return r.json();}}).then(function(d){{
+      var btn=document.getElementById('regen-btn');
+      var st=document.getElementById('regen-status');
+      if(d.error){{ st.textContent='Error: '+d.error; st.style.color='#f38ba8'; btn.disabled=false; btn.style.opacity='1'; }}
+      else if(d.running){{ st.textContent='Generating...'; pollRegen(); }}
+      else if(d.done){{ st.textContent='Updated ✓'; st.style.color='#a6e3a1'; setTimeout(function(){{location.reload();}},800); }}
+      else{{ btn.disabled=false; btn.style.opacity='1'; }}
+    }});
+  }},2000);
+}}
+</script>"""
     # Inject nav bar + regenerate bar into the screener body
     content = content.replace("<body>", "<body>\n" + _NAV_BAR + regenerate_bar, 1)
     return content
@@ -1195,16 +1220,7 @@ def screener_page():
 @app.route("/screener/generate")
 @login_required
 def screener_generate():
-    try:
-        import sys as _sys
-        agents_dir = Path(__file__).parent
-        if str(agents_dir) not in _sys.path:
-            _sys.path.insert(0, str(agents_dir))
-        import screener_generator as _sg
-        out = _sg.main()
-        return redirect("/screener")
-    except Exception as e:
-        return f"<pre>Error: {e}</pre>", 500
+    return redirect("/screener")
 
 
 
@@ -2898,6 +2914,9 @@ import threading
 _sync_state = {"running": False, "log": [], "error": None}
 _sync_lock  = threading.Lock()
 
+_screener_state = {"running": False, "error": None, "done": False}
+_screener_lock  = threading.Lock()
+
 ENV_PATH = Path("/home/freed/autotrade/.env")
 
 
@@ -2985,6 +3004,47 @@ def _data_coverage() -> dict:
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "symbols": 0, "rows": 0, "earliest": None, "latest": None, "gap_days": 0}
+
+
+def _run_screener_bg() -> None:
+    """Run screener_generator in a background thread."""
+    with _screener_lock:
+        _screener_state["running"] = True
+        _screener_state["error"]   = None
+        _screener_state["done"]    = False
+    try:
+        import sys as _sys
+        agents_dir = str(Path(__file__).parent)
+        if agents_dir not in _sys.path:
+            _sys.path.insert(0, agents_dir)
+        import screener_generator as _sg
+        _sg.main()
+        with _screener_lock:
+            _screener_state["done"] = True
+    except Exception as exc:
+        with _screener_lock:
+            _screener_state["error"] = str(exc)
+    finally:
+        with _screener_lock:
+            _screener_state["running"] = False
+
+
+@app.route("/api/screener/generate", methods=["POST"])
+@login_required
+def api_screener_generate():
+    with _screener_lock:
+        if _screener_state["running"]:
+            return jsonify({"status": "already_running"}), 409
+    t = threading.Thread(target=_run_screener_bg, daemon=True)
+    t.start()
+    return jsonify({"status": "started"})
+
+
+@app.route("/api/screener/status")
+@login_required
+def api_screener_status():
+    with _screener_lock:
+        return jsonify(dict(_screener_state))
 
 
 @app.route("/data")

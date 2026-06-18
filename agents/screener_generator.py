@@ -113,6 +113,8 @@ def load_db_weekly(universe: list[str], weeks: int = 54) -> pd.DataFrame:
     try:
         bench = yf.download("^NSEI", period=f"{weeks+4}wk", interval="1wk",
                              auto_adjust=True, progress=False)["Close"]
+        if isinstance(bench, pd.DataFrame):
+            bench = bench.iloc[:, 0]
         frames["^NSEI"] = bench
     except Exception:
         pass
