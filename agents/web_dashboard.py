@@ -1182,8 +1182,13 @@ def screener_page():
     latest = files[0]
     content = open(latest).read()
     date_label = Path(latest).stem
-    # Inject nav bar into the screener body
-    content = content.replace("<body>", "<body>\n" + _NAV_BAR, 1)
+    regenerate_bar = f"""
+<div style="background:#1e1e2e;padding:6px 20px;display:flex;align-items:center;gap:16px;font-size:12px;color:#a6adc8;border-bottom:1px solid #313244">
+  <span>Last generated: <b style="color:#cdd6f4">{date_label}</b></span>
+  <a href="/screener/generate" style="background:#89b4fa;color:#1e1e2e;padding:4px 14px;border-radius:4px;text-decoration:none;font-weight:600">&#8635; Regenerate</a>
+</div>"""
+    # Inject nav bar + regenerate bar into the screener body
+    content = content.replace("<body>", "<body>\n" + _NAV_BAR + regenerate_bar, 1)
     return content
 
 
