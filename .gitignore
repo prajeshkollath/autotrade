@@ -11,3 +11,8 @@ __pycache__/
 /*.txt
 node_modules/
 .DS_Store
+.venv/
+data/
+skills/
+*.bak_*
+notebooks/.ipynb_checkpoints/
