@@ -96,3 +96,90 @@ def memory_delete(key: str) -> bool:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM agent_memory WHERE key = %s", (key,))
             return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# daily_ohlcv helpers
+# ---------------------------------------------------------------------------
+
+def create_daily_ohlcv_table() -> None:
+    """Create daily_ohlcv table and index if they don't exist."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS daily_ohlcv (
+                    symbol      VARCHAR(20)  NOT NULL,
+                    trade_date  DATE         NOT NULL,
+                    open        NUMERIC(12,2),
+                    high        NUMERIC(12,2),
+                    low         NUMERIC(12,2),
+                    close       NUMERIC(12,2),
+                    volume      BIGINT,
+                    PRIMARY KEY (symbol, trade_date)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS daily_ohlcv_sym_date
+                ON daily_ohlcv (symbol, trade_date DESC)
+            """)
+
+
+def upsert_ohlcv_batch(rows: list[dict]) -> int:
+    """
+    Insert or update OHLCV rows. Each row must have keys:
+        symbol, trade_date, open, high, low, close, volume
+    Returns number of rows written.
+    """
+    if not rows:
+        return 0
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(cur, """
+                INSERT INTO daily_ohlcv (symbol, trade_date, open, high, low, close, volume)
+                VALUES %s
+                ON CONFLICT (symbol, trade_date) DO UPDATE SET
+                    open   = EXCLUDED.open,
+                    high   = EXCLUDED.high,
+                    low    = EXCLUDED.low,
+                    close  = EXCLUDED.close,
+                    volume = EXCLUDED.volume
+            """, [(r["symbol"], r["trade_date"], r["open"], r["high"],
+                   r["low"], r["close"], r["volume"]) for r in rows])
+    return len(rows)
+
+
+def get_ohlcv_latest_date(symbol: str) -> Optional[datetime]:
+    """Return the most recent trade_date for a symbol, or None."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(trade_date) FROM daily_ohlcv WHERE symbol = %s",
+                (symbol,)
+            )
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+
+
+def get_ohlcv_symbols() -> list[str]:
+    """Return all distinct symbols in daily_ohlcv."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT symbol FROM daily_ohlcv ORDER BY symbol")
+            return [r[0] for r in cur.fetchall()]
+
+
+def get_ohlcv_df(symbol: str, days: int = 400):
+    """
+    Return daily OHLCV for a symbol as a list of dicts sorted by date ascending.
+    Requires psycopg2 and returns raw dicts (no pandas dependency here).
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT trade_date, open, high, low, close, volume
+                FROM daily_ohlcv
+                WHERE symbol = %s
+                ORDER BY trade_date ASC
+                LIMIT %s
+            """, (symbol, days))
+            return [dict(r) for r in cur.fetchall()]

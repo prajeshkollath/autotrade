@@ -2,6 +2,9 @@
 """
 screener_generator.py — Daily NSE screener: IBD RS + Weinstein Stage + Sector Rotation + Scans.
 
+Data source: daily_ohlcv table in PostgreSQL (populated by agents/dhan_ohlcv_sync.py).
+Sector indices still use yfinance (not stored in DB).
+
 HOW TO RUN:
   cd ~/autotrade
   .venv/bin/python3.12 agents/screener_generator.py
@@ -10,17 +13,22 @@ Scheduled via systemd timer daily at 18:00 IST (after market close).
 """
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import yfinance as yf
+
+sys.path.insert(0, "/home/freed/autotrade")
+from shared.db import get_ohlcv_symbols, get_ohlcv_df
 
 IST     = timezone(timedelta(hours=5, minutes=30))
 OUT_DIR = Path("/home/freed/autotrade/data/screener")
 
-NIFTY50 = [
+# Fallback static list if DB is empty
+NIFTY50_FALLBACK = [
     "ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK",
     "BAJAJ-AUTO","BAJFINANCE","BAJAJFINSV","BEL","BPCL",
     "BHARTIARTL","BRITANNIA","CIPLA","COALINDIA","DRREDDY",
@@ -62,32 +70,85 @@ SECTOR_INDICES = {
 }
 
 
-# ─── Data fetchers ────────────────────────────────────────────────────────────
+# ─── Data loaders ─────────────────────────────────────────────────────────────
 
-def fetch_weekly_data() -> pd.DataFrame:
-    """52-week weekly OHLC for NIFTY50 stocks + NIFTY index."""
-    tickers = [s + ".NS" for s in NIFTY50] + ["^NSEI"]
-    print(f"Fetching weekly data ({len(tickers)} tickers)...")
-    raw = yf.download(tickers, period="52wk", interval="1wk",
-                      auto_adjust=True, progress=False)["Close"]
-    return raw
+def load_universe() -> list[str]:
+    """
+    Return the screener universe: all symbols in daily_ohlcv (F&O stocks).
+    Falls back to NIFTY50_FALLBACK if the DB is empty.
+    """
+    syms = get_ohlcv_symbols()
+    if syms:
+        print(f"  Universe from DB: {len(syms)} symbols")
+        return syms
+    print(f"  DB empty — falling back to NIFTY50 static list ({len(NIFTY50_FALLBACK)} stocks)")
+    return NIFTY50_FALLBACK
 
 
-def fetch_daily_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """6-month daily OHLCV for scans."""
-    tickers = [s + ".NS" for s in NIFTY50]
-    print(f"Fetching daily data ({len(tickers)} tickers)...")
-    raw = yf.download(tickers, period="6mo", interval="1d",
-                      auto_adjust=True, progress=False)
-    closes  = raw["Close"]
-    volumes = raw.get("Volume", pd.DataFrame())
+def _db_to_series(symbol: str, col: str, days: int) -> pd.Series:
+    """Read one column from daily_ohlcv as a date-indexed Series."""
+    rows = get_ohlcv_df(symbol, days=days)
+    if not rows:
+        return pd.Series(dtype=float)
+    idx  = pd.to_datetime([r["trade_date"] for r in rows])
+    vals = [float(r[col]) if r[col] is not None else float("nan") for r in rows]
+    return pd.Series(vals, index=idx)
+
+
+def load_db_weekly(universe: list[str], weeks: int = 54) -> pd.DataFrame:
+    """
+    Load daily close from DB and resample to weekly (Friday close).
+    Returns wide DataFrame: columns = symbols + '^NSEI', index = weekly dates.
+    """
+    days = weeks * 7 + 14
+    print(f"  Loading weekly data from DB ({len(universe)} symbols, ~{weeks}w)...", end="", flush=True)
+
+    frames = {}
+    for sym in universe:
+        s = _db_to_series(sym, "close", days).resample("W-FRI").last()
+        if len(s) >= 10:
+            frames[sym] = s
+
+    # Benchmark: still fetch from yfinance (only 1 ticker)
+    try:
+        bench = yf.download("^NSEI", period=f"{weeks+4}wk", interval="1wk",
+                             auto_adjust=True, progress=False)["Close"]
+        frames["^NSEI"] = bench
+    except Exception:
+        pass
+
+    df = pd.DataFrame(frames)
+    print(f" done ({len(frames)} columns)")
+    return df
+
+
+def load_db_daily(universe: list[str], days: int = 180) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load daily OHLCV from DB for scan computations.
+    Returns (closes_df, volumes_df).
+    """
+    print(f"  Loading daily data from DB ({len(universe)} symbols, {days}d)...", end="", flush=True)
+
+    closes_map  = {}
+    volumes_map = {}
+    for sym in universe:
+        rows = get_ohlcv_df(sym, days=days)
+        if not rows:
+            continue
+        idx  = pd.to_datetime([r["trade_date"] for r in rows])
+        closes_map[sym]  = pd.Series([float(r["close"])  if r["close"]  is not None else float("nan") for r in rows], index=idx)
+        volumes_map[sym] = pd.Series([float(r["volume"]) if r["volume"] is not None else 0.0          for r in rows], index=idx)
+
+    closes  = pd.DataFrame(closes_map)
+    volumes = pd.DataFrame(volumes_map)
+    print(f" done ({len(closes_map)} symbols)")
     return closes, volumes
 
 
 def fetch_sector_index_data() -> pd.DataFrame:
-    """1-year weekly data for NSE sector indices."""
+    """1-year weekly data for NSE sector indices (still from yfinance — not in DB)."""
     tickers = list(SECTOR_INDICES.values()) + ["^NSEI"]
-    print(f"Fetching sector index data ({len(tickers)} indices)...")
+    print(f"  Fetching sector index data ({len(tickers)} indices from yfinance)...")
     raw = yf.download(tickers, period="52wk", interval="1wk",
                       auto_adjust=True, progress=False)["Close"]
     return raw
@@ -95,21 +156,21 @@ def fetch_sector_index_data() -> pd.DataFrame:
 
 # ─── Computations ─────────────────────────────────────────────────────────────
 
-def compute_rs(closes: pd.DataFrame) -> dict[str, float]:
+def compute_rs(closes: pd.DataFrame, universe: list[str]) -> dict[str, float]:
     """IBD-style RS: weighted quarterly performance vs NIFTY50, normalised 1–99."""
-    nifty = closes["^NSEI"].dropna()
+    nifty = closes["^NSEI"].dropna() if "^NSEI" in closes.columns else pd.Series(dtype=float)
     scores = {}
-    for sym in NIFTY50:
-        col = sym + ".NS"
-        if col not in closes.columns:
+    def qret(ser, n):
+        return (ser.iloc[-1] / ser.iloc[-(n+1)] - 1) if len(ser) > n else 0
+    for sym in universe:
+        if sym not in closes.columns:
             continue
-        s = closes[col].dropna()
+        s = closes[sym].dropna()
         if len(s) < 13:
             continue
-        def qret(ser, n):
-            return (ser.iloc[-1] / ser.iloc[-(n+1)] - 1) if len(ser) > n else 0
         stock = 0.4*qret(s,13) + 0.2*qret(s,26) + 0.2*qret(s,39) + 0.2*qret(s,52)
-        bench = 0.4*qret(nifty,13) + 0.2*qret(nifty,26) + 0.2*qret(nifty,39) + 0.2*qret(nifty,52)
+        bench = (0.4*qret(nifty,13) + 0.2*qret(nifty,26) + 0.2*qret(nifty,39) + 0.2*qret(nifty,52)
+                 if len(nifty) >= 13 else 0)
         scores[sym] = stock - bench
     vals = list(scores.values())
     if not vals:
@@ -119,14 +180,13 @@ def compute_rs(closes: pd.DataFrame) -> dict[str, float]:
     return {k: round(1 + 98*(v - lo)/rng) for k, v in scores.items()}
 
 
-def compute_stage(closes: pd.DataFrame) -> dict[str, dict]:
+def compute_stage(closes: pd.DataFrame, universe: list[str]) -> dict[str, dict]:
     """Weinstein stage: price vs 30-week MA and MA slope."""
     results = {}
-    for sym in NIFTY50:
-        col = sym + ".NS"
-        if col not in closes.columns:
+    for sym in universe:
+        if sym not in closes.columns:
             continue
-        s = closes[col].dropna()
+        s = closes[sym].dropna()
         if len(s) < 30:
             continue
         ma30     = s.rolling(30).mean()
@@ -220,7 +280,8 @@ def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 
 def compute_scans(closes: pd.DataFrame, volumes: pd.DataFrame,
-                  weekly_stages: dict, rs_ratings: dict) -> dict[str, list[dict]]:
+                  weekly_stages: dict, rs_ratings: dict,
+                  universe: list[str]) -> dict[str, list[dict]]:
     """Run 6 technical scans on daily data."""
     scans: dict[str, list[dict]] = {
         "rs_leaders":      [],
@@ -231,11 +292,10 @@ def compute_scans(closes: pd.DataFrame, volumes: pd.DataFrame,
         "oversold_bounce": [],
     }
 
-    for sym in NIFTY50:
-        col = sym + ".NS"
-        if col not in closes.columns:
+    for sym in universe:
+        if sym not in closes.columns:
             continue
-        s = closes[col].dropna()
+        s = closes[sym].dropna()
         if len(s) < 50:
             continue
 
@@ -289,8 +349,8 @@ def compute_scans(closes: pd.DataFrame, volumes: pd.DataFrame,
                 })
 
         # 5. Volume Surge: today's volume > 2x 20-day avg
-        if volumes is not None and col in volumes.columns:
-            v = volumes[col].dropna()
+        if volumes is not None and sym in volumes.columns:
+            v = volumes[sym].dropna()
             if len(v) >= 21:
                 avg_vol = float(v.iloc[-21:-1].mean())
                 today_vol = float(v.iloc[-1])
@@ -341,10 +401,11 @@ def _heat_bg(v: float) -> str:
     if v >= -1:   return "#2a1c1c"
     return "#3a1c1c"
 
-def build_html(rs: dict, stages: dict, sector_rot: list, scans: dict, date_str: str) -> str:
+def build_html(rs: dict, stages: dict, sector_rot: list, scans: dict, date_str: str,
+               universe: list[str]) -> str:
     # ── Tab 1: Stock table ───────────────────────────────────────────
     rows = []
-    for sym in NIFTY50:
+    for sym in universe:
         if sym not in rs or sym not in stages:
             continue
         rows.append({"sym": sym, "sector": SECTORS.get(sym, "OTHER"), "rs": rs[sym], **stages[sym]})
@@ -610,19 +671,24 @@ def main():
     today    = datetime.now(IST).strftime("%Y-%m-%d")
     out_path = OUT_DIR / f"{today}.html"
 
-    # Fetch all data
-    weekly  = fetch_weekly_data()
-    sec_idx = fetch_sector_index_data()
-    daily_c, daily_v = fetch_daily_data()
+    print(f"\n=== WealthLab Screener  {today} ===")
+
+    # Universe from DB (F&O stocks) or fallback
+    universe = load_universe()
+
+    # Load data
+    weekly          = load_db_weekly(universe)
+    sec_idx         = fetch_sector_index_data()
+    daily_c, daily_v = load_db_daily(universe)
 
     # Compute
-    rs       = compute_rs(weekly)
-    stages   = compute_stage(weekly)
+    rs       = compute_rs(weekly, universe)
+    stages   = compute_stage(weekly, universe)
     sec_rot  = compute_sector_rotation(sec_idx)
-    scans    = compute_scans(daily_c, daily_v, stages, rs)
+    scans    = compute_scans(daily_c, daily_v, stages, rs, universe)
 
     # Build and save
-    html = build_html(rs, stages, sec_rot, scans, today)
+    html = build_html(rs, stages, sec_rot, scans, today, universe)
     out_path.write_text(html)
 
     s2 = sum(1 for s in stages.values() if s["stage"] == 2)

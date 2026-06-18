@@ -47,46 +47,51 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+
+sys.path.insert(0, "/home/freed/autotrade")
+from shared.db import get_ohlcv_symbols, get_ohlcv_df
+
 IST = timezone(timedelta(hours=5, minutes=30))
 SCREENER_DIR = Path("/home/freed/autotrade/data/screener")
 BRIEFS_DIR   = Path("/home/freed/autotrade/data/morning_briefs")
 
 # ---------------------------------------------------------------------------
-# NIFTY 50 universe — symbol (yfinance .NS) → sector
-# Update this list as constituents change
+# Static sector map — used for display.  DB universe overrides symbol list.
+# Plain NSE symbols (no .NS suffix) to match daily_ohlcv table.
 # ---------------------------------------------------------------------------
-UNIVERSE: dict[str, str] = {
-    "RELIANCE.NS":    "ENERGY",
-    "TCS.NS":         "IT",
-    "HDFCBANK.NS":    "BANKING",
-    "INFY.NS":        "IT",
-    "HINDUNILVR.NS":  "FMCG",
-    "ICICIBANK.NS":   "BANKING",
-    "KOTAKBANK.NS":   "BANKING",
-    "SBIN.NS":        "BANKING",
-    "BHARTIARTL.NS":  "TELECOM",
-    "ITC.NS":         "FMCG",
-    "BAJFINANCE.NS":  "FINANCE",
-    "LT.NS":          "INFRA",
-    "ASIANPAINT.NS":  "CONSUMER",
-    "AXISBANK.NS":    "BANKING",
-    "MARUTI.NS":      "AUTO",
-    "TITAN.NS":       "CONSUMER",
-    "SUNPHARMA.NS":   "PHARMA",
-    "NESTLEIND.NS":   "FMCG",
-    "WIPRO.NS":       "IT",
-    "HCLTECH.NS":     "IT",
-    "ULTRACEMCO.NS":  "CEMENT",
-    "POWERGRID.NS":   "ENERGY",
-    "NTPC.NS":        "ENERGY",
-    "ONGC.NS":        "ENERGY",
-    "TATAMOTORS.NS":  "AUTO",    # may show as delisted transiently — skip gracefully
-    "TATASTEEL.NS":   "METALS",
-    "COALINDIA.NS":   "ENERGY",
-    "ADANIENT.NS":    "INFRA",
-    "ADANIPORTS.NS":  "INFRA",
-    "BAJAJFINSV.NS":  "FINANCE",
-    "BAJAJ-AUTO.NS":  "AUTO",
+SECTOR_MAP: dict[str, str] = {
+    "RELIANCE":    "ENERGY",
+    "TCS":         "IT",
+    "HDFCBANK":    "BANKING",
+    "INFY":        "IT",
+    "HINDUNILVR":  "FMCG",
+    "ICICIBANK":   "BANKING",
+    "KOTAKBANK":   "BANKING",
+    "SBIN":        "BANKING",
+    "BHARTIARTL":  "TELECOM",
+    "ITC":         "FMCG",
+    "BAJFINANCE":  "FINANCE",
+    "LT":          "INFRA",
+    "ASIANPAINT":  "CONSUMER",
+    "AXISBANK":    "BANKING",
+    "MARUTI":      "AUTO",
+    "TITAN":       "CONSUMER",
+    "SUNPHARMA":   "PHARMA",
+    "NESTLEIND":   "FMCG",
+    "WIPRO":       "IT",
+    "HCLTECH":     "IT",
+    "ULTRACEMCO":  "CEMENT",
+    "POWERGRID":   "ENERGY",
+    "NTPC":        "ENERGY",
+    "ONGC":        "ENERGY",
+    "TATAMOTORS":  "AUTO",
+    "TATASTEEL":   "METALS",
+    "COALINDIA":   "ENERGY",
+    "ADANIENT":    "INFRA",
+    "ADANIPORTS":  "INFRA",
+    "BAJAJFINSV":  "FINANCE",
+    "BAJAJ-AUTO":  "AUTO",
     "TECHM.NS":       "IT",
     "M&M.NS":         "AUTO",
     "DIVISLAB.NS":    "PHARMA",
@@ -97,15 +102,15 @@ UNIVERSE: dict[str, str] = {
     "HEROMOTOCO.NS":  "AUTO",
     "BRITANNIA.NS":   "FMCG",
     "APOLLOHOSP.NS":  "PHARMA",
-    "JSWSTEEL.NS":    "METALS",
-    "HINDALCO.NS":    "METALS",
-    "TATACONSUM.NS":  "FMCG",
-    "SBILIFE.NS":     "FINANCE",
-    "HDFCLIFE.NS":    "FINANCE",
-    "INDUSINDBK.NS":  "BANKING",
-    "UPL.NS":         "AGRI",
-    "GRASIM.NS":      "CEMENT",
-    "SHREECEM.NS":    "CEMENT",
+    "JSWSTEEL":    "METALS",
+    "HINDALCO":    "METALS",
+    "TATACONSUM":  "FMCG",
+    "SBILIFE":     "FINANCE",
+    "HDFCLIFE":    "FINANCE",
+    "INDUSINDBK":  "BANKING",
+    "UPL":         "AGRI",
+    "GRASIM":      "CEMENT",
+    "SHREECEM":    "CEMENT",
 }
 
 # Benchmark for RS comparison (Nifty 50 index)
@@ -125,55 +130,39 @@ STAGE2_MIN_RS = 70
 
 
 # ---------------------------------------------------------------------------
-# Data download
+# Data loading — from daily_ohlcv PostgreSQL table
 # ---------------------------------------------------------------------------
 
-def download_ohlcv(symbols: list[str], period: str = "14mo") -> dict:
+def load_ohlcv_from_db(symbols: Optional[list[str]] = None, days: int = 270) -> dict:
     """
-    Downloads daily OHLCV from Yahoo Finance for all symbols in one batch call.
-    Returns dict: symbol → DataFrame with columns [Open, High, Low, Close, Volume].
-    Symbols not found or with insufficient data are excluded with a warning.
+    Load daily OHLCV from daily_ohlcv table.
+    Returns dict: symbol → DataFrame with columns [Close, Volume] (date-indexed).
+    Falls back to all symbols in DB if symbols=None.
     """
-    try:
-        import yfinance as yf
-    except ImportError:
-        sys.exit("yfinance not installed — run: .venv/bin/pip install yfinance")
+    if symbols is None:
+        symbols = get_ohlcv_symbols()
+    if not symbols:
+        sys.exit("daily_ohlcv table is empty — run: python agents/dhan_ohlcv_sync.py --backfill")
 
-    print(f"  Downloading {len(symbols)} symbols from Yahoo Finance...", end="", flush=True)
-    # Download all at once — yfinance batches automatically, much faster than loop
-    raw = yf.download(
-        symbols,
-        period=period,
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-    )
-    print(" done")
-
+    print(f"  Loading {len(symbols)} symbols from daily_ohlcv...", end="", flush=True)
+    needed = QUARTER_DAYS * 4 + 10   # ~262 days minimum for full RS calc
     result = {}
-    needed = QUARTER_DAYS * 4 + 10   # 12+ months needed for full RS calc
-
-    if len(symbols) == 1:
-        # Single symbol — yfinance returns flat DataFrame, not grouped
-        sym = symbols[0]
-        if len(raw) >= needed:
-            result[sym] = raw
-        else:
-            print(f"    !!  {sym}: only {len(raw)} days, skipping")
-        return result
 
     for sym in symbols:
-        try:
-            df = raw[sym].dropna(subset=["Close"])
-            if len(df) >= needed:
-                result[sym] = df
-            else:
-                print(f"    !!  {sym}: only {len(df)} days, skipping")
-        except Exception:
-            print(f"    !!  {sym}: download failed, skipping")
+        rows = get_ohlcv_df(sym, days=days)
+        if not rows:
+            continue
+        idx    = pd.to_datetime([r["trade_date"] for r in rows])
+        closes = [float(r["close"])  if r["close"]  is not None else float("nan") for r in rows]
+        vols   = [float(r["volume"]) if r["volume"] is not None else 0.0           for r in rows]
+        df = pd.DataFrame({"Close": closes, "Volume": vols}, index=idx)
+        df.index.name = "Date"
+        if len(df.dropna(subset=["Close"])) >= needed:
+            result[sym] = df
+        else:
+            print(f"\n    !!  {sym}: only {len(df)} days, skipping", end="")
 
+    print(f" done ({len(result)} symbols loaded)")
     return result
 
 
@@ -299,7 +288,7 @@ def build_results(
         results.append({
             "symbol":    ticker,
             "yf_symbol": sym,
-            "sector":    UNIVERSE.get(sym, "OTHER"),
+            "sector":    SECTOR_MAP.get(sym, "OTHER"),
             "price":     round(price_now, 2),
             "chg_1m":    round((price_now - price_1m) / price_1m * 100, 1) if price_1m else 0,
             "chg_3m":    round((price_now - price_3m) / price_3m * 100, 1) if price_3m else 0,
@@ -539,18 +528,20 @@ def run_screener(
     print("\n=== WealthLab RS Screener ===")
     today = datetime.now(IST).strftime("%Y-%m-%d")
 
-    # Filter universe by sector if requested
-    symbols = [
-        sym for sym, sec in UNIVERSE.items()
-        if sector_filter is None or sec.upper() == sector_filter.upper()
-    ]
-    if not symbols:
+    # Load all F&O symbols from DB, then optionally filter by sector
+    all_symbols = get_ohlcv_symbols() or list(SECTOR_MAP.keys())
+    if sector_filter:
+        all_symbols = [
+            s for s in all_symbols
+            if SECTOR_MAP.get(s, "OTHER").upper() == sector_filter.upper()
+        ]
+    if not all_symbols:
         sys.exit(f"No symbols found for sector: {sector_filter}")
 
-    # Download OHLCV (14 months = 4 full quarters + MA buffer)
-    data = download_ohlcv(symbols, period="14mo")
+    # Load OHLCV from DB (14 months = 4 full quarters + MA buffer)
+    data = load_ohlcv_from_db(all_symbols, days=300)
     if not data:
-        sys.exit("No data downloaded — check yfinance connectivity")
+        sys.exit("No data in daily_ohlcv — run: python agents/dhan_ohlcv_sync.py --backfill")
 
     # Compute RS scores
     print("  Computing RS scores...", end="", flush=True)
@@ -595,7 +586,7 @@ def run_screener(
 
     output = {
         "date":      today,
-        "universe":  len(symbols),
+        "universe":  len(all_symbols),
         "analysed":  len(data),
         "results":   results,
         "sectors":   sectors,
